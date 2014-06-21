@@ -1,0 +1,22 @@
+aws:
+  #======================
+  #--- authentication
+  #======================
+  access_key_id: ACCESS_KEY
+  secret_access_key: SECRET_KEY
+  
+  #========================================
+  #--- default region, unless overridden
+  #========================================
+  region: DEFAULT REGION
+
+  #======================
+  #--- Proxy config
+  #======================
+  #proxy_uri: http://192.168.2.42:8080
+
+
+op5:
+  url: 'https://192.168.2.35'
+  userName: monitor
+  password: monitor

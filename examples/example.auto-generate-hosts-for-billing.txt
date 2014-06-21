@@ -1,0 +1,6 @@
+# Demo host for billing
+#
+# - Requires op5 and management pack for AWS billing
+
+./monitor.rb -t host --create --options='host_name=AWS-Billing,alias=AWS-Billing,address=127.0.0.1,hostgroups=aws-billing'
+

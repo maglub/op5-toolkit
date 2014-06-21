@@ -1,0 +1,13 @@
+#
+# 1) list instances in ec2
+# 2) use awk to format a ./monitor.rb command
+#                   ===== 1 ====                ====== 2 =====
+../../nagios-cloudwatch/check_cloudwatch.rb --ec2 --list-instances | awk '{print "./monitor.rb -t host --create --options='\''host_name="$2",alias="$2",address=127.0.0.1,_EC2_ID="$4",hostgroups=aws-ec2-instances,_EC2_REGION=us-west-2'\''"}'
+
+# Example output
+
+./monitor.rb -t host --create --options='host_name=vpn-v001ec2,alias=vpn-v001ec2,address=127.0.0.1,_EC2_ID=i-91f62199,hostgroups=aws-ec2-instances,_EC2_REGION=us-west-2'
+./monitor.rb -t host --create --options='host_name=kmg-test002ec2,alias=kmg-test002ec2,address=127.0.0.1,_EC2_ID=i-7ef62176,hostgroups=aws-ec2-instances,_EC2_REGION=us-west-2'
+./monitor.rb -t host --create --options='host_name=win-test003ec2,alias=win-test003ec2,address=127.0.0.1,_EC2_ID=i-9956e691,hostgroups=aws-ec2-instances,_EC2_REGION=us-west-2'
+
+# If these commands are run, each host will be created belonging to the host group "ec2-instances" and have 2 custom variables set _EC2_ID and _EC2_REGION
