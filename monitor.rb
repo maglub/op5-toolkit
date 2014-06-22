@@ -24,509 +24,106 @@ require 'net/http'
 %w[ rubygems getoptlong yaml pp json open-uri].each { |f| require f }
 
 
+begin
+#------------------------------------------------------------------------
+# Definitions:
+#
+# Actions: command line parameters stating an action:
+#
+#  --list-changes
+#  --commit-changes
+#  --rollback-changes
+#  --create
+#  --delete
+#  --change
+#  --list (default action)
+#
+# Object type
+#
+#  --type=<object type> or -t <object type>
+#      host
+#      hostgroup
+#      hostgroupservice
+#      service
+#      servicegroup
+#      contact
+#      contactgroup
+#
+# Object identification
+#
+#  --name=<object name> or -n <object name>
+#
+# Options
+#
+#  --json='<json string>'   -  If you need to send a full JSON string to, for example, --create
+#  --option="key=value"     -  Note, only a few known keywords (i.e. groups) will translate to
+#                              an array, even if normally required. For complex options, use --json 
+#                           
+#  --address=<ip or address>
+#  --alias=<alias>
+#  --description=<description>  - I.e. service description, which equals to --name if -t service is used
+#
+#------------------------------------------------------------------------
+end
+
 #============================================
 # Predefined variables 
 #============================================
 configDir = File.expand_path(File.dirname(__FILE__) )
 configFile = File.expand_path(configDir + '/config.yml')
 
-op5Url        = nil
-op5User       = nil
-op5Password   = nil
-op5Type       = nil
-op5NameColumn = nil
-optHost       = nil
-optOptions    = nil
-optContact    = nil
-optGroup      = nil
+$logDir   = File.expand_path(File.dirname(__FILE__) + "/log" )
+$logFile  = File.open( $logDir + "/monitor.log", 'a') 
+#============================================
+# Global variables
+#============================================
 
-#$servicesColumns = "description,state,host.alias"
-$serviceColumns   = "description,state,host.name,groups"
-$hostColumns      = "name,alias,address,state"
-$commentColumns   = "comment,service.description,host.name"
-$contactColumns   = "name,alias,email"
+$op5Url                 = nil
+$commentColumns         = "comment,service.description,host.name"
+$contactColumns         = "name,alias,email"
+$contactgroupColumns    = "name,alias,members"
+$hostColumns            = "name,alias,address,state"
+$hostgroupColumns       = "name,alias,members"
+$serviceColumns         = "description,state,host.name,groups"
+$servicegroupColumns     = "name,alias,members"
+
+OBJECT_TYPE_HOST         = "hosts"
+OBJECT_TYPE_HOSTGROUP    = "hostgroups"
+OBJECT_TYPE_SERVICE      = "services"
+OBJECT_TYPE_SERVICEGROUP = "servicegroups"
+OBJECT_TYPE_CONTACT      = "contacts"
+OBJECT_TYPE_CONTACTGROUP = "contactgroups"
+
+
+$allColumns = {
+  OBJECT_TYPE_HOST         => $hostColumns,
+  OBJECT_TYPE_HOSTGROUP    => $hostgroupColumns,
+  OBJECT_TYPE_CONTACT      => $contactColumns,
+  OBJECT_TYPE_CONTACTGROUP => $contactgroupColumns,
+  OBJECT_TYPE_SERVICE      => $serviceColumns,
+  OBJECT_TYPE_SERVICEGROUP => $servicegroupColumns
+}
+
+DEBUG   = 2
+VERBOSE = 1
+NORMAL  = 0
 
 $debug = false
+$writeToLogfile = false
+$verboseLevel = 0
 
-optAcknowledged=false
-optAction = "list"
+optAction         = "list"
+optType           = OBJECT_TYPE_HOST
+op5User           = nil
+op5Password       = nil
+optObjectFilter   = {}
+optJSON           = nil
 
 #============================================
-# Functions
+# functions
 #============================================
-def usage
-  puts <<EOT
-Usage: #{$0} [-v]
-  --help, -h:                              This Help
-  --config, -c:                            Use config file (default config.yml in the same directory as this script)
-  --type, -t:                              Type [host|service|service-comment|host-comment]
-  --host, -H:                              Specify host name
-  --service, -H:                           Specify service name
-  --degug, -v:                             Output debug information
-  --service-comment {--acknowledged}:      Service comments (--acknowledged, only non OK and ack:ed services are shown)
-  --create
-  --list-changes
-  --commit-changes
-  --rollback-changes
-  --options = "host_name=apa,alias=bepa"
-Example:
 
-* List all hosts                       -  #{$0} -t host
-* List all services                    -  #{$0} -t service
-* List all services for one host:      -  #{$0} -t service --host="<hostname>"
-* List all services named "SSH"        -  #{$0} -t service --service=SSH
-
-Query (--query="<query>"):
-
-If a query has a result set (hits), the return code is 0, otherwise 1. The queries are based on the OP5 filters, where the type will be passed as the output format, i.e. [services] or [hosts]
-
-* List acknowledged services            -  #{$0} -t service --query="acknowledged != 0"
-* List services containing "l0" or "L0" -         -  #{$0} -t service --query='description ~~ "l0"'
-
-* List service comments that are acknowledged, and parse the output for Service Now incidents
-  
-  #{$0} -t service-comment --acknowledged | sed -e 's!\\([iI][nN][cC][0-9]*\\)!<a href="https://<snow url>/nav_to.do?uri=incident.do?sysparm_query=number=\\1">\\1</a>!g'
-
-* List services in unacknowledged services in Warning/Critical state, that is not scheduled for downtime (identical to a default view in the web gui)
-  
-  #{$0} -t service --query="host.scheduled_downtime_depth = 0 and ((state != 0 and acknowledged = 0 and scheduled_downtime_depth = 0) or (host.state != 0 and host.acknowledged = 0))"
-  
-* Check if a host or services exists    - The result code is 0 if the host exists, otherwise 1
-  
-  #{$0} -t host --host=monitor > /dev/null ; echo $?
-
-Other hints:
-
-* Use another config file than default (config.yml)
-
-  #{$0} --config=/path/to/my/config/file.yml
-  
-For an overview of query parameters, refer to https://kb.op5.com/display/GUI/Listview+filter+columns 
-
-* Create a host named kmg-test003ec2, with a couple of custom variables, and put it into hostgroup ec2-linux-std:
-
-./monitor.rb -t host --create --options='host_name=kmg-test003ec2,alias=win-test003ec2,address=127.0.0.1,_EC2_ID=i-dab2b385,hostgroups=ec2-linux-std,_EC2_REGION=us-west-1'
-
-EOT
-end
-
-#----------------------------------------
-# op5DoFilterRequest
-#----------------------------------------
-
-def op5DoFilterRequest(type, query, columns)
-  
-  thisQuery = "[#{type}]#{query}&columns=#{columns}"
-  $stderr.puts "Query: #{thisQuery}" if $debug
-
-  uriEncoded = URI.encode($op5Url + "/api/filter/query?format=json&query=#{thisQuery}&limit=10000000")
-  $stderr.puts "URI: #{uriEncoded}" if $debug
-
-  uri = URI.parse(uriEncoded)
-
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-
-  request = Net::HTTP::Get.new(uri.request_uri)
-  request.basic_auth($op5User, $op5Password )
-
-  response = http.request(request)
-  res=JSON.parse(response.body)
-
-  return res
-  
-end #--- end of op5DoFilterRequest
-
-def op5DoConfigRequest(objectType, objectName)
-  
-  #thisQuery = "[#{type}]#{query}&columns=#{columns}"
-  #$stderr.puts "Query: #{thisQuery}" if $debug
-
-  uriEncoded = URI.encode($op5Url + "/api/config/#{objectType}/#{objectName}?format=json&limit=10000000")
-  $stderr.puts "URI: #{uriEncoded}" if $debug
-
-  uri = URI.parse(uriEncoded)
-
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-
-  request = Net::HTTP::Get.new(uri.request_uri)
-  request.basic_auth($op5User, $op5Password )
-
-  response = http.request(request)
-  res=JSON.parse(response.body)
-
-  res = res.inject({}){|memo,(k,v)| memo[k.to_sym] = v; memo}
-
-  result = []
-  #pp res[:services]
-  res[:services].each do | service |
-    result << {:service_description => service["service_description"]}
-    puts "#{objectName};#{service["service_description"]}"
-  end
-  return res
-  
-end #--- end of op5DoFilterRequest
-
-def op5GetAllHostgroups()
-  uriEncoded = URI.encode($op5Url + "/api/config/hostgroup?format=json&limit=10000000")
-  $stderr.puts "URI: #{uriEncoded}" if $debug
-
-  uri = URI.parse(uriEncoded)
-
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-
-  request = Net::HTTP::Get.new(uri.request_uri)
-  request.basic_auth($op5User, $op5Password )
-
-  response = http.request(request)
-  res=JSON.parse(response.body)
-
-#  res = res.inject({}){|memo,(k,v)| memo[k.to_sym] = v; memo}
-
-  return res
-  
-  result = []
-  #pp res[:services]
-  res[:services].each do | service |
-    result << {:service_description => service["service_description"]}
-    puts "#{objectName};#{service["service_description"]}"
-  end
-  return res
-end
-
-def op5PrintAllHostgroups()
-  res = op5GetAllHostgroups
-  res.each do |hostgroup|
-    puts "#{hostgroup["name"]}"
-  end
-end
-
-def op5GetHostgroupServices(hostgroup)
-  uriEncoded = URI.encode($op5Url + "/api/config/hostgroup/#{hostgroup}?format=json&limit=10000000")
-  $stderr.puts "URI: #{uriEncoded}" if $debug
-
-  uri = URI.parse(uriEncoded)
-
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-
-  request = Net::HTTP::Get.new(uri.request_uri)
-  request.basic_auth($op5User, $op5Password )
-
-  response = http.request(request)
-  res=JSON.parse(response.body)
-
-#  res = res.inject({}){|memo,(k,v)| memo[k.to_sym] = v; memo}
-
-  return res
-end
-
-def op5GetAllHostgroupServices()
-  res = op5GetAllHostgroups
-  
-  resArray = []
-  res.each do |hostgroup|
-    res2 = op5GetHostgroupServices(hostgroup["name"])
-    if (!res2["services"].nil?)
-      res2["services"].each do |hostgroupservice|
-        puts "#{hostgroup["name"]};#{hostgroupservice["service_description"]}" if $debug
-        resArray << {:name => hostgroup["name"], :service_description => hostgroupservice["service_description"]}
-      end
-    end
-#    puts "#{hostgroup["name"]}"
-  end
-  return resArray
-end
-
-def op5PrintAllHostgroupServices()
-  res = op5GetAllHostgroupServices()
-  res.each do |hostgroupService|
-    puts "#{hostgroupService[:name]};#{hostgroupService[:service_description]}"
-  end
-end
-
-def op5PrintHostgroupServices(hostgroup)
-  res = op5GetHostgroupServices(hostgroup)
-  res.each do |hostgroupService|
-    puts "#{hostgroup};#{hostgroupservice["service_description"]}"
-  end
- 
-end
-def op5DoCreate(type, name, jsonString)
-  uriEncoded = URI.encode($op5Url + "/api/config/#{type}/#{hostName}")
-  $stderr.puts "URI: #{uriEncoded}" if $debug
-  
-  uri = URI.parse(uriEncoded)
-  
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-  
-  request = Net::HTTP::Get.new(uri.request_uri)
-  request.basic_auth($op5User, $op5Password )
-  
-  response = http.request(request)
-  res=JSON.parse(response.body)
-  
-  return res
-
-end
-
-#----------------------------------------
-# op5GetHostConfig
-#----------------------------------------
-def op5GetHostConfig(hostName)
-  
-  $stderr.puts "  - Getting host config" if $debug
-  uriEncoded = URI.encode($op5Url + "/api/config/host/#{hostName}?format=json")
-  $stderr.puts "URI: #{uriEncoded}" if $debug
-  
-  uri = URI.parse(uriEncoded)
-  
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-  
-  request = Net::HTTP::Get.new(uri.request_uri)
-  request.basic_auth($op5User, $op5Password )
-  
-  response = http.request(request)
-  res=JSON.parse(response.body)
-  
-  return res
-
-end
-
-#----------------------------------------
-# op5ServiceExists
-#----------------------------------------
-def op5ServiceExists(hostName, serviceName)
-
-  name = hostName + ";" + serviceName
-  
-  uriEncoded=URI.encode($op5Url + "/api/status/service/#{name}?format=json")
-  uri = URI.parse(usiEncoded)
-
-  #pp uri
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-
-  request = Net::HTTP::Get.new(uri.request_uri)
-  request.basic_auth($op5User, $op5Password )
-
-  response = http.request(request)
-  res=JSON.parse(response.body)
-
-  return res
-end #--- end of op5ServiceExists
-
-#----------------------------------------
-# op5ServiceExists
-#----------------------------------------
-
-def op5ServiceExists
-  res = op5DoFilterRequest("hosts", "all", "name")
-  return res
-end #--- end of op5ServiceExists
-
-#----------------------------------------
-#
-#----------------------------------------
-
-def op5GetAllServices()
-  $stderr.puts "Getting all services" if $debug
-  res = op5DoFilterRequest("services", "all", $serviceColumns)
-  return res
-end
-
-def op5GetHostServices(filter)
-  res = op5DoFilterRequest("services", filter, $serviceColumns)  
-  return res
-end
-
-def op5GetService(host, service)
-  query = ""
-  
-  if (host != "all")
-    query = 'host.name = "' + host + '"'
-  end
-    
-  if (service != "all")
-    #--- if the query is empty (no host), there is no need for "and"
-    query = (query == "" ) ? 'description = "' + service + '"' : query + ' and description = "' + service + '"'
-  end
-  
-  res = op5DoFilterRequest("services", query, $serviceColumns)
-  return res
-end
-
-def op5GetGroupService(group, service)
-  query = ""
-  
-  if (group != "all")
-    query = 'groups ~ "' + group + '"'
-  end
-    
-  if (service != "all")
-    #--- if the query is empty (no host), there is no need for "and"
-    query = (query == "" ) ? 'description = "' + service + '"' : query + ' and description = "' + service + '"'
-  end
-
-  pp query
-  exit 0
-  
-  res = op5DoFilterRequest("services", query, $serviceColumns)
-  pp res if $debug
-  return res
-end
-
-def op5GetQuery(query)
-  res = op5DoFilterRequest("services", host + " and " + service, $serviceColumns+$op5ExtraColumns)
-  return res  
-end
-
-def op5GetServiceComments(host, service)
-  res = op5DoFilterRequest("comments", 'is_service = 1 and host.name = "' + host + '" and service.description = "' + service + '"' , "comment,entry_time,expire_time,service.acknowledged,entry_type")
-  return res
-end
-
-#--------------------------------------------------
-# common functions
-#--------------------------------------------------
-
-def op5DeleteObject(type, name)
-  $stderr.puts "* Entering: #{thisMethod()}" if $debug 
-  
-  if (name.nil? || name == "")
-    $stderr.puts "Error: no object name passed: #{options.inspect}"
-    return 1
-  end
-  
-  uriEncoded=URI.encode($op5Url + "/api/config/#{type}/#{name}?format=json")
-  uri = URI.parse(uriEncoded)
-
-  #pp uri
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-
-  request = Net::HTTP::Delete.new(uri.request_uri)
-  request.basic_auth($op5User, $op5Password )
-  
-  response = http.request(request)
-  puts response.body
-
-  return 0
-
-end
-
-#--------------------------------------------------
-# contact functions
-#--------------------------------------------------
-
-def op5GetAllContacts()
-  res = op5DoFilterRequest("contacts", "all", $contactColumns)
-  return res
-end
-
-def op5PrintAllContacts()
-  $stderr.puts "* Entering: #{thisMethod()}" if $debug 
-  
-  op5GetAllContacts.each do |contact|
-    puts "#{contact["name"]}"
-  end
-  return 0
-end
-
-def op5DeleteContact(options)
-  $stderr.puts "* Entering: #{thisMethod()}" if $debug 
-
-  op5DeleteObject("contact", options[:name])
-
-  return 0
-
-end
-
-#--------------------------------------------------
-# host functions
-#--------------------------------------------------
-def op5GetHostComments(host)
-  res = op5DoFilterRequest("comments", 'is_service = 0 and host.name = "' + host + '"' , "comment,entry_time,expire_time,host.acknowledged")
-  return res
-end
-
-def op5GetAllHosts()
-  res = op5DoFilterRequest("hosts", "all", $hostColumns)
-  return res
-end
-
-def op5GetHost(host)
-  puts "Looking for host: #{host}" if $debug
-  res = op5DoFilterRequest("hosts", 'name ="' +host +'"', $hostColumns)
-  return res
-end
-
-def op5CreateHost(options = nil)
-  
-  if (options.nil?)
-    $stderr.puts "Error: no options passed: #{options.inspect}"
-    return 1
-  end
-  
-  optionsHash = {}  
-  options.each do |hash, value|
-    optionsHash[hash] = value
-  end
-
-  if (optionsHash[:template].nil?)
-    optionsHash[:template] = "default-host-template"
-  end
-  
-  optionsJSON = optionsHash.to_json
-  
-  $stderr.puts "  - optionsHash = #{optionsHash.inspect}" if $debug
-  $stderr.puts "  - optionsJSON = #{optionsJSON}" if $debug
-  
-  uriEncoded=URI.encode($op5Url + "/api/config/host")
-  uri = URI.parse(uriEncoded)
-
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-
-  request = Net::HTTP::Post.new(uri.request_uri)
-  request.basic_auth($op5User, $op5Password )
-  request.add_field("content-type","application/json")
-  #request.set_form_data(optionsHash)
-  request.body = optionsHash.to_json
-  
-  response = http.request(request)
-  res=JSON.parse(response.body)
-  
-  if (response.code.to_i == 201)
-    $stderr.puts "OK: created #{optionsHash[:host_name]}"
-  else
-    $stderr.puts "Error: #{res["error"]}"
-  end
-  
-  return 0
-end
-
-
-def op5DeleteHost(name)
-  $stderr.puts "* Entering: #{thisMethod()}" if $debug 
-  op5DeleteObject("host", name)
-  return 0
-end
-
-def listOP5Changes()
+def op5ListChanges()
   uriEncoded=URI.encode($op5Url + "/api/config/change?format=json")
   uri = URI.parse(uriEncoded)
 
@@ -547,7 +144,7 @@ def listOP5Changes()
   return 0
 end
 
-def commitOP5Changes()
+def op5CommitChanges()
   uriEncoded=URI.encode($op5Url + "/api/config/change?format=json")
   uri = URI.parse(uriEncoded)
 
@@ -565,7 +162,7 @@ def commitOP5Changes()
   return 0
 end
 
-def rollbackOP5Changes()
+def op5RollbackChanges()
   uriEncoded=URI.encode($op5Url + "/api/config/change?format=json")
   uri = URI.parse(uriEncoded)
 
@@ -583,311 +180,557 @@ def rollbackOP5Changes()
   return 0
 end
 
-def hashifyString(string)
-  hash = {}
-  string.split(/,/).each do |token|
-    name, value = token.split(/=/)
-    case name
-    when 'hostgroups'
-      hash[name] = [value]
-    else
-      hash[name] = value
-    end
-  end
-  hash = hash.inject({}){|memo,(k,v)| memo[k.to_sym] = v; memo}
-  
-  pp hash if $debug
-  return hash
+#-------------------------------------------------------------------
+# logIt, helper method to print verbose/debug information
+#        to the screen and optionally to a log file
+#-------------------------------------------------------------------
+def logIt(message, *levelOptional)
+  level = (levelOptional[0].nil?) ? 0 : levelOptional[0]
+  $stderr.puts "#{message}" if level <= $verboseLevel
+  ts=Time.now().strftime("%Y-%m-%d %H:%M:%S %Z")
+  $logFile.puts(Process.pid.to_s + ";" + ts + ";" + level.to_s + ";" + message) if ($writeToLogfile)
 end
 
 #-------------------------------------------------------------------
 # thisMethod, helper method to print the method name when debugging
 #-------------------------------------------------------------------
-def thisMethod
+def thisMethod()
   caller[0]=~/`(.*?)'/  # note the first quote is a backtick
   $1
 end
 
-#============================================
-# Parse options
-#============================================
-if (ARGV.length == 0 )
-  usage
-  exit 0
+#-------------------------------------------------------------------
+# usageShort - minimal help page
+#-------------------------------------------------------------------
+def usageShort()
+  puts <<EOT
+  
+  Usage: #{$0} <ACTION> -t <TYPE> <NOUN> {<OPTIONS>}
+
+  Actions (deployment):    [ --list-changes | --commit-changes | --rollback-changes ]
+  Actions (configuration): [ --list (default) | --create | --delete | --patch ]
+
+  --type=<objectType>| -t <objectType>:   objectType: { host | hostgroup | contact | contactgroup | service | servicegroup }
+  Simplify your use of this command by keeping your credentials in config.yml. For full help, use option --help
+
+  Example: ./monitor.rb --t host   (will list all hosts, since the default action is --list)
+
+EOT
 end
+
+#-------------------------------------------------------------------
+# usage - minimal help page + examples
+#-------------------------------------------------------------------
+def usage()
+  usageShort
+  puts <<EOT
+
+  * List all hosts                       -  #{$0} -t host
+  * List all services                    -  #{$0} -t service
+  * List all services for one host:      -  #{$0} -t service --host="<hostname>"
+  * List all services named "SSH"        -  #{$0} -t service --service=SSH
+
+  Query (--query="<query>"):
+
+  If a query has a result set (hits), the return code is 0, otherwise 1. The queries are based on the OP5 filters, where the type will be passed as the output format, i.e. [services] or [hosts]
+
+  * List acknowledged services            -  #{$0} -t service --query="acknowledged != 0"
+  * List services containing "l0" or "L0" -         -  #{$0} -t service --query='description ~~ "l0"'
+
+  * List service comments that are acknowledged, and parse the output for Service Now incidents
+  
+    #{$0} -t service-comment --acknowledged | sed -e 's!\\([iI][nN][cC][0-9]*\\)!<a href="https://<snow url>/nav_to.do?uri=incident.do?sysparm_query=number=\\1">\\1</a>!g'
+
+  * List services in unacknowledged services in Warning/Critical state, that is not scheduled for downtime (identical to a default view in the web gui)
+  
+    #{$0} -t service --query="host.scheduled_downtime_depth = 0 and ((state != 0 and acknowledged = 0 and scheduled_downtime_depth = 0) or (host.state != 0 and host.acknowledged = 0))"
+  
+  * Check if a host or services exists    - The result code is 0 if the host exists, otherwise 1
+  
+    #{$0} -t host --host=monitor > /dev/null ; echo $?
+
+  Other hints:
+
+  * Use another config file than default (config.yml)
+
+    #{$0} --config=/path/to/my/config/file.yml
+  
+  For an overview of query parameters, refer to https://kb.op5.com/display/GUI/Listview+filter+columns 
+
+  * Create a host named kmg-test003ec2, with a couple of custom variables, and put it into hostgroup ec2-linux-std:
+
+  ./monitor.rb -t host --create --options='host_name=kmg-test003ec2,alias=win-test003ec2,address=127.0.0.1,_EC2_ID=i-dab2b385,hostgroups=ec2-linux-std,_EC2_REGION=us-west-1'
+
+
+EOT
+end
+
+def op5DoFilterRequest(type, query)
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  logIt("  - type: #{type} query: #{query}", DEBUG)
+  
+  columns = $allColumns[type]
+  
+  thisQuery = "[#{type}]#{query}&columns=#{columns}"
+  logIt("  - query: #{thisQuery}",DEBUG)
+
+  uriEncoded = URI.encode($op5Url + "/api/filter/query?format=json&query=#{thisQuery}&limit=10000000")
+  $stderr.puts "URI: #{uriEncoded}" if $debug
+
+  uri = URI.parse(uriEncoded)
+
+  http = Net::HTTP.new(uri.host, uri.port)
+  http.use_ssl = true
+  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+  request = Net::HTTP::Get.new(uri.request_uri)
+  request.basic_auth($op5User, $op5Password )
+
+  response = http.request(request)
+  res=JSON.parse(response.body)
+
+  return res
+  
+end #--- end of op5DoFilterRequest
+
+#--------------------------------------------------
+# host functions
+#--------------------------------------------------
+
+def op5GetHostComments(host)
+  res = op5DoFilterRequest("comments", 'is_service = 0 and host.name = "' + host + '"')
+  return res
+end
+
+def op5GetAllHosts()
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  res = op5DoFilterRequest(OBJECT_TYPE_HOST, "all")
+  return res
+end
+
+def op5GetHost(host)
+  logIt("Looking for host: #{host}",DEBUG)
+  res = op5DoFilterRequest(OBJECT_TYPE_HOST, 'name ="' +host +'"')
+  return res
+end
+
+#--------------------------------------------------
+# hostgroup functions
+#--------------------------------------------------
+
+def op5GetAllHostgroups()
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  res = op5DoFilterRequest(OBJECT_TYPE_HOSTGROUP, "all")
+  return res
+end
+
+#--------------------------------------------------
+# service functions
+#--------------------------------------------------
+
+def op5GetAllServices()
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  res = op5DoFilterRequest(OBJECT_TYPE_SERVICE, "all")
+  return res
+end
+
+#--------------------------------------------------
+# servicegroup functions
+#--------------------------------------------------
+
+def op5GetAllServicegroups()
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  res = op5DoFilterRequest(OBJECT_TYPE_SERVICEGROUP, "all")
+  return res
+end
+
+#--------------------------------------------------
+# contact functions
+#--------------------------------------------------
+
+def op5GetAllContacts()
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  contacts = op5DoFilterRequest(OBJECT_TYPE_CONTACT, "all")
+  
+  contacts.each do | contact |
+    contact["contactgroups"] = []
+    contact["contactgroups"] << op5GetContactgropusByMember(contact["name"])
+  end
+  return contacts
+end
+
+def op5GetContactsByQuery(query)
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  contacts = op5DoFilterRequest(OBJECT_TYPE_CONTACT, query)
+
+  contacts.each do | contact |
+    contact["contactgroups"] = []
+    contact["contactgroups"] << op5GetContactgropusByMember(contact["name"])
+  end
+  return contacts
+end
+
+#--------------------------------------------------
+# contactgroup functions
+#--------------------------------------------------
+
+def op5GetAllContactgroups()
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  res = op5DoFilterRequest(OBJECT_TYPE_CONTACTGROUP, "all")
+  return res
+end
+
+def op5GetContactgropusByMember(member)
+  contactgroups = []
+  contactgroups = op5DoFilterRequest("contactgroups", 'members >= "' + member + '"')
+  return contactgroups  
+end
+
+#-------------------------------------------------------------------
+# op5DeleteObjects() - wrapper method for deleting multiple objects
+#-------------------------------------------------------------------
+def op5DeleteObjects(type,objects)
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  
+  objects.each do |object|
+    op5DeleteObject(type, object["name"])
+  end
+end
+
+def op5DeleteObject(type, name)
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  
+  type = type.gsub(/s$/, '')
+  
+  if (name.nil? || name == "")
+    logIt("Error: no object name passed.", DEBUG)
+    return 1
+  end
+
+  logIt("  - Preparing to delete #{type} named #{name}", DEBUG)
+  uriEncoded=URI.encode($op5Url + "/api/config/#{type}/#{name}?format=json")
+  uri = URI.parse(uriEncoded)
+
+  #pp uri
+  http = Net::HTTP.new(uri.host, uri.port)
+  http.use_ssl = true
+  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+  request = Net::HTTP::Delete.new(uri.request_uri)
+  request.basic_auth($op5User, $op5Password )
+  
+  response = http.request(request)
+  puts response.body
+
+  return 0
+
+end
+
+#-------------------------------------------------------------------
+# op5PrintObjects() - wrapper method for listing objects
+#-------------------------------------------------------------------
+def op5PrintObjects(type,objects)
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  
+  objects.each do |object|
+    case type
+    when OBJECT_TYPE_HOST
+      printf "name: %-25s alias: %-40s address: %-15s state: %i\n", object["name"], object["alias"], object["address"], object["state"] if (! object["name"].nil?)
+    when OBJECT_TYPE_HOSTGROUP, OBJECT_TYPE_CONTACTGROUP, OBJECT_TYPE_SERVICEGROUP
+
+      printf "name: %-25s alias: %-40s members: ", object["name"], object["alias"] if (! object["name"].nil?)
+      printCount=0
+      object["members"].each do | member |
+        printf "," if printCount > 0
+        printf "%s", (member.class.to_s == "Array") ?  member[0] + ";" + member[1] : member
+        printCount += 1
+      end
+      printf "\n"
+      
+    when OBJECT_TYPE_SERVICE
+      printf "host_name: %-25s description: %-40s\n", object["host"]["name"], object["description"] if (! object["description"].nil?)
+    when OBJECT_TYPE_CONTACT
+      printf "name: %-25s alias: %-30s email: %-35s contactgroups: ", object["name"], object["alias"], object["email"] if (! object["name"].nil?)
+
+      printCount=0
+      object["contactgroups"].each do |contactgroup|
+        printf "," if printCount > 0
+        printf "%s", contactgroup[0]["name"]
+        printCount += 1
+      end
+      printf "\n"
+    end
+  end
+end
+
+def op5GetAllObjectsByType(type)
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  res = {}
+  
+  case type
+    when OBJECT_TYPE_HOST         ; res = op5GetAllHosts()
+    when OBJECT_TYPE_HOSTGROUP    ; res = op5GetAllHostgroups()
+    when OBJECT_TYPE_SERVICE      ; res = op5GetAllServices()
+    when OBJECT_TYPE_SERVICEGROUP ; res = op5GetAllServicegroups()
+    when OBJECT_TYPE_CONTACT      ; res = op5GetAllContacts()
+    when OBJECT_TYPE_CONTACTGROUP ; res = op5GetAllContactgroups()
+  end
+  
+  return res
+end
+
+def op5GetObjectsByQuery(type, query)
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  res = {}
+  
+  #--- exceptions, when not enough information is returned (i.e. the contacts does not return the members of the contact group)
+  case type
+    when OBJECT_TYPE_CONTACT
+      res = op5GetContactsByQuery(query)
+    else
+      res = op5DoFilterRequest(type, query)
+    end
+  
+  return res
+  
+end
+
+
+def getQueryStringByType(type, objectFilter = {})
+  
+  
+  #--------------------------------------
+  # translation definitions
+  #--------------------------------------
+  
+  translateTable = {
+    "services" => {
+      :alias  => "alias",
+      :name   => "description",
+      :host   => "host.name"
+    },
+    "hosts" => {
+      :alias  => "alias",
+      :name => "name",
+      :host => "name"
+    },
+    "hostgroups" => {
+      :alias  => "alias",
+      :name => "name"
+    },
+    "contacts" => {
+      :alias  => "alias",
+      :name => "name"      
+    },
+    "contactgroups" => {
+      :alias  => "alias",
+      :name => "name"      
+    }
+  }
+  
+  thisQuery = ""
+  
+  predicateCount = 0
+  objectFilter.each do | snippet |
+    logIt("  - snippet: #{snippet}", DEBUG)
+    
+    thisQuery += " and " if (predicateCount > 0)
+    thisQuery += translateTable[type][snippet[0]] + ' = "' + snippet[1].to_s + '"'
+
+    predicateCount += 1
+  end
+
+  thisQuery = "all" if (thisQuery == "")
+  return thisQuery
+end
+
+
+def op5ListObjects(type, objectFilter = {})
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+  logIt("  - objectFilter: " + objectFilter.inspect, DEBUG)
+
+  res = {}
+
+  if (objectFilter[:query].nil?)
+    objectFilter[:query] = getQueryStringByType(type, objectFilter)
+    logIt("  - parsedQuery: " + objectFilter[:query], DEBUG)
+  end
+  
+  
+  if ( objectFilter == {})
+    res = op5GetAllObjectsByType(type)
+  elsif (!objectFilter[:query].nil?)
+    logIt("type: #{type} query: #{objectFilter[:query]}", DEBUG)
+    res = op5GetObjectsByQuery(type, objectFilter[:query])
+    #op5DoFilterRequest(type, objectFilter[:query])
+  end
+    
+ return res
+end
+
+def getObjectType(type)
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+
+  res = nil
+  
+  case type
+    when 'host','hosts'                   ; res = OBJECT_TYPE_HOST
+    when 'hostgroup','hostgroups'         ; res = OBJECT_TYPE_HOSTGROUP
+    when 'contact', 'contacts'            ; res = OBJECT_TYPE_CONTACT
+    when 'contactgroup', 'contactgroups'  ; res = OBJECT_TYPE_CONTACTGROUP
+    when 'service', 'services'            ; res = OBJECT_TYPE_SERVICE 
+    when 'servicegroup', 'servicegroups'  ; res = OBJECT_TYPE_SERVICEGROUP
+  end
+  
+  logIt("  - type: #{res}", DEBUG)
+  return res
+end
+
+#============================================
+#============================================
+# MAIN
+#============================================
+#============================================
 
 opts = GetoptLong.new
 opts.quiet = true
 
+#-----------------------------
+# define options
+#-----------------------------
+begin
 opts.set_options(
-  [ "--help", "-h", GetoptLong::NO_ARGUMENT],
-  [ "--debug", "-v", GetoptLong::NO_ARGUMENT],
-  [ "--user", "-u", GetoptLong::OPTIONAL_ARGUMENT],
-  [ "--password", "-p", GetoptLong::OPTIONAL_ARGUMENT],
-  [ "--type", "-t", GetoptLong::OPTIONAL_ARGUMENT],
-  [ "--host", "-H", GetoptLong::OPTIONAL_ARGUMENT],
-  [ "--service", "-S", GetoptLong::OPTIONAL_ARGUMENT],
-  [ "--query", "-Q", GetoptLong::OPTIONAL_ARGUMENT],
-  [ "--with-comments", GetoptLong::NO_ARGUMENT],
-  [ "--acknowledged", GetoptLong::NO_ARGUMENT],
-  [ "--config", "-c", GetoptLong::OPTIONAL_ARGUMENT],
-  [ "--create", GetoptLong::OPTIONAL_ARGUMENT],
-  [ "--delete", GetoptLong::OPTIONAL_ARGUMENT],
-  [ "--get-config", GetoptLong::NO_ARGUMENT],
-  [ "--list-changes", GetoptLong::NO_ARGUMENT],
+  [ "--help-short", "-h", GetoptLong::NO_ARGUMENT],
+  [ "--help",             GetoptLong::NO_ARGUMENT],
+  [ "--debug",            GetoptLong::NO_ARGUMENT],
+  [ "--verbose", "-v",    GetoptLong::OPTIONAL_ARGUMENT],
+  
+  #--- credentials and configuration
+  [ "--user", "-u",       GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--password", "-p",   GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--url",              GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--config", "-C",     GetoptLong::OPTIONAL_ARGUMENT],
+
+  #--- actions -> deployment
+  [ "--list-changes",     GetoptLong::NO_ARGUMENT],
   [ "--rollback-changes", GetoptLong::NO_ARGUMENT],
-  [ "--commit-changes", GetoptLong::NO_ARGUMENT],
-  [ "--options", GetoptLong::OPTIONAL_ARGUMENT],  
-  [ "--group", "-G", GetoptLong::OPTIONAL_ARGUMENT],  
-  [ "--contact", GetoptLong::OPTIONAL_ARGUMENT]  
+  [ "--commit-changes",   GetoptLong::NO_ARGUMENT],
+
+  #--- actions -> configuration
+  [ "--create",           GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--delete",           GetoptLong::OPTIONAL_ARGUMENT],
+    
+  #--- options
+  [ "--type", "-t",       GetoptLong::OPTIONAL_ARGUMENT],
+
+  #--- options - objectFilters
+  [ "--address",          GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--alias",            GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--name", "-n",       GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--host", "-H",       GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--options",          GetoptLong::OPTIONAL_ARGUMENT],  
+
+  #--- extra features
+  [ "--json",             GetoptLong::OPTIONAL_ARGUMENT],  
+  [ "--query", "-Q",      GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--with-comments",    GetoptLong::NO_ARGUMENT],
+  [ "--acknowledged",     GetoptLong::NO_ARGUMENT],
+  [ "--get-config",       GetoptLong::NO_ARGUMENT],
 )
-
-opts.quiet = true
-
-op5Host="all"
-op5Service="all"
-op5Query=""
-optGetComments = false
-
+end
+#-----------------------------
+# parsing options
+#-----------------------------
 
 begin
-opts.each do |opt,arg|
-  case opt
-    when '--help'
-      begin
-        usage
-        exit 0
-      end
-    when '--debug'
-      $debug = true
-    when '--config'
-      configFile=arg
-    when '--user'
-      op5User=arg
-    when '--password'
-      op5Password=arg 
-    when '--type'
-      op5Type=arg 
-    when '--host'
-      op5Host=arg
-    when '--service'
-          op5Service = arg
-    when '--query'
-    begin
-      op5Query = arg
-    end
-    when '--with-comments'
-      optGetComments = true
-    when '--acknowledged'
-      optAcknowledged = true
-    when '--create'
-      optAction = "create"
-    when '--get-config'
-      optAction = "getConfig"
-    when '--list-changes'
-      optAction = "review"
-    when '--rollback-changes'
-      optAction = "rollback"
-    when '--commit-changes'
-      optAction = "commit"
-    when '--delete'
-      optAction = "delete"
-    when '--options'
-      optOptions = arg
-    when '--contact'
-      optContact = arg
-    when '--group'
-      optGroup = arg
+  opts.each do |opt, arg|
+    case opt
+      when '--help'             ; usage();      exit 0
+      when '--help-short'       ; usageShort(); exit 0
+      when '--debug'            ; $writeToLogfile = true ; $verboseLevel = DEBUG
+      
+      #--- deployment actions
+      when '--list-changes'     ; optAction = "list-changes"
+      when '--rollback-changes' ; optAction = "rollback-changes"
+      when '--commit-changes'   ; optAction = "commit-changes"
+      
+      #--- configuration actions
+      when '--list'             ; optAction = "list"
+      when '--create'           ; optAction = "create"
+      when '--patch'            ; optAction = "patch"
+      when '--delete'           ; optAction = "delete"
+        
+      #--- object type
+      when '--type'             ; optType         = getObjectType(arg)
 
+      #-- object filters
+      when '--alias'            ; optObjectFilter[:alias]        = arg
+      when '--name'             ; optObjectFilter[:name]         = arg
+      when '--host'             ; optObjectFilter[:host        ] = arg
+      when '--hostgroup'        ; optObjectFilter[:hostgroup   ] = arg
+      when '--service'          ; optObjectFilter[:service     ] = arg
+      when '--servicegroup'     ; optObjectFilter[:servicegroup] = arg
+      when '--contact'          ; optObjectFilter[:contact     ] = arg
+      when '--contactgroup'     ; optObjectFilter[:contactgroup] = arg
+      when '--query'            ; optObjectFilter[:query]        = arg
+
+      #--- extra features
+      when '--json'             ; optJSON = arg
+    end
+  end
+rescue Exception => e
+  usageShort unless e.to_s == "exit"
+  exit 0
+end
+
+#-----------------------------
+# Config file (yml)
+#-----------------------------
+
+begin
+  if File.exist?(configFile)
+    config = YAML.load(File.read(configFile))
+  
+    #--- set default config for AWS (i.e. access key, secret key, region, http proxy in config["aws"])
+  #  AWS.config(config["aws"])
+  
+    #--- set default config for this app (in config["app"])
+    $op5Url = config["op5"]["url"].nil? ? nil : config["op5"]["url"]
+    $op5User = op5User.nil? ? config["op5"]["userName"] : op5User
+    $op5Password = op5Password.nil? ? config["op5"]["password"] : op5Password
+    
+  else
+    puts "WARNING: #{configFile} does not exist"
   end
 end
-rescue Exception => e
-  usage
-  exit 1
-end
 
+#-----------------------------
+# Actions
+#-----------------------------
 
-#============================================
-# Config file (yml)
-#============================================
+logIt("* Starting #{$0} - type: #{optType}",DEBUG)
 
-if File.exist?(configFile)
-  config = YAML.load(File.read(configFile))
-
-  #--- set default config for AWS (i.e. access key, secret key, region, http proxy in config["aws"])
-#  AWS.config(config["aws"])
-
-  #--- set default config for this app (in config["app"])
-  $op5Url = config["op5"]["url"].nil? ? nil : config["op5"]["url"]
-  $op5User = op5User.nil? ? config["op5"]["userName"] : op5User
-  $op5Password = op5Password.nil? ? config["op5"]["password"] : op5Password
-  
-else
-  puts "WARNING: #{configFile} does not exist"
-end
-
-#============================================
-# Query types
-#============================================
-
-op5Type = op5Type.nil? ? "hosts" : op5Type
 
 case optAction
-when 'review'
-  listOP5Changes()
+when 'list-changes'
+  op5ListChanges()
   exit 0
-when 'rollback'
-  rollbackOP5Changes()
+when 'rollback-changes'
+  op5RollbackChanges()
   exit 0
-when 'commit'
-  commitOP5Changes()
+when 'commit-changes'
+  op5CommitChanges()
   exit 0
-end
-
-  
-case op5Type
-  when 'hosts', 'host'
-  begin
-    case optAction
-      when 'list'
-        if ( op5Query != "" )
-          res = op5DoFilterRequest("hosts", op5Query, "name")
-        elsif (op5Host != "all")
-          res = op5GetHost(op5Host)
-        else
-          res = op5GetAllHosts()
-        end
-      when 'create'
-        if (optOptions.nil?)
-          hostOptions = {:host_name => op5Host, :address => "127.0.0.1", :alias => op5Host}
-        else
-          hostOptions = hashifyString(optOptions)
-        end
-        
-        $stderr.puts "  - Creating new host #{hostOptions[:host_name]}"
-
-        op5CreateHost(hostOptions)
-        exit 0
-      when 'getConfig'
-        pp op5GetHostConfig(op5Host)
-        exit 0
-       when 'delete'
-        op5DeleteHost(op5Host)
-        exit 0
-    end
-  end
-  when 'contacts'
-  begin
-    case optAction
-      when 'list'
-          op5PrintAllContacts()
-          exit 0
-      when 'delete'
-        op5DeleteContact({:name => optContact})
-        exit 0
-    end
-  end
-  when 'service', 'services'
-    case optAction
-      when 'list'
-      begin
-        if ( op5Query != "" )
-          res = op5DoFilterRequest("services", op5Query, "description,state,host.name")
-        elsif (op5Host == "all" && op5Service == "all" && optGroup == nil)
-          res = op5GetAllServices()
-        elsif (optGroup != "all")
-          res = op5DoConfigRequest("hostgroup", optGroup)
-          exit 0
-        else
-          res = op5GetService(op5Host, op5Service)
-        end
-      end
-    end
-  when 'hostgroups'
-    case optAction
-      when 'list'
-        op5PrintAllHostgroups()
-        exit 0
-    end
-  when 'hostgroupservices'
-  case optAction
-    when 'list'
-      begin
-        if (optGroup == nil && op5Service == "all")
-          res = op5PrintAllHostgroupServices()
-          exit 0
-        elsif (optGroup != "all")
-          res = op5DoConfigRequest("hostgroup", optGroup)
-          exit 0
-        else
-          res = op5GetService(op5Host, op5Service)
-        end
-      end
-    end
-  when 'service-comments', 'service-comment'
-  begin
-    case optAcknowledged
-      when true
-        res = op5DoFilterRequest("comments","type = 2 and service.acknowledged != 0 and service.state != 0 and entry_type = 4", $commentColumns)
-      when false
-        res = op5DoFilterRequest("comments","type = 2", $commentColumns)
-    end  
-  end
-  when 'host-comments', 'host-comment'
-  begin
-    case optAcknowledged
-      when true
-        res = op5DoFilterRequest("comments","type = 1 and service.acknowledged != 0 and service.state != 0 and entry_type = 4", $commentColumns)
-      when false
-        res = op5DoFilterRequest("comments","type = 1", $commentColumns)
-    end  
-  end
-end
-
-
-#============================================
-# MAIN
-#============================================
-
-#https://kb.op5.com/display/GUI/Listview+filter+columns#Listviewfiltercolumns-Services
-
-if (res.count == 0)
+when 'list'
+  objects = op5ListObjects(optType,optObjectFilter)
+  op5PrintObjects(optType, objects)
+when 'create'
+when 'patch'
+when 'delete'
+  objects = op5ListObjects(optType,optObjectFilter)
+  op5DeleteObjects(optType, objects )
+else
+  logIt("ERROR: No valid action selected.", NORMAL)
   exit 1
 end
 
-res.each do |item|
-      #  puts "========================================="
-      #  pp item
-  
-  case op5Type
-    when 'service', 'services'
-    begin
-      if (item["host"]["name"])
-        puts item["host"]["name"] + ";" + item["description"] + ";State: " + item["state"].to_s
-        if (optGetComments == true)
-          commentsRes = op5GetServiceComments(item["host"]["name"],item["description"])
-          commentsRes.each do "resItem"
-            pp commentsRes
-          end #--- end commentsRes.each do
-        end
-      end
-    end #--- end when 'service'
-        
-    when 'service-comment', 'service-comments', 'host-comment', 'host-comments'
-    begin
-        pp item if $debug
-        puts "#{item["host"]["name"]};#{item["service"]["description"]};#{item["comment"]}"
-    end #--- end of service-comment
-    when 'host', 'hosts'
-    begin
-      puts "#{item["name"].to_s};#{item["alias"].to_s};#{item["address"].to_s};#{item["state"]}"
-      if (optGetComments)
-        commentsRes = op5GetHostComments(item["name"])
-        commentsRes.each do |resItem|
-            pp resItem
-        end #--- end commentsRes.each do
-      end #--- end of if(optGetComments)
-    end #--- end of host
-
-  end #--- end case op5Type
-end #--- end res.each do
