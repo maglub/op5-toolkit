@@ -21,7 +21,7 @@
 #============================================
 
 require 'net/http'
-%w[ rubygems getoptlong yaml pp json open-uri].each { |f| require f }
+%w[ rubygems getoptlong yaml pp json open-uri openssl].each { |f| require f }
 
 
 begin
@@ -389,6 +389,7 @@ end
 #-------------------------------------------------------------------
 # op5DeleteObjects() - wrapper method for deleting multiple objects
 #-------------------------------------------------------------------
+
 def op5DeleteObjects(type,objects)
   logIt("* Entering: #{thisMethod()}", DEBUG)
   
@@ -426,12 +427,95 @@ def op5DeleteObject(type, name)
 
 end
 
+def op5CreateObjectByTypeJSON(type, jsonString)
+    logIt("* Entering: #{thisMethod()}", DEBUG)
+    thisObject = JSON::parse(jsonString)
+    pp thisObject
+    type = type.gsub(/s$/, '')
+
+    hostName=thisObject["host_name"]
+    uriEncoded = URI.encode($op5Url + "/api/config/#{type}/#{hostName}")
+    logIt("URI: #{uriEncoded}", DEBUG)
+  
+    uri = URI.parse(uriEncoded)
+  
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+  
+    request = Net::HTTP::Put.new(uri.request_uri)
+    request.add_field("content-type","application/json")
+    
+    request.basic_auth($op5User, $op5Password )
+    request.body = jsonString
+    response = http.request(request)
+    res=JSON.parse(response.body)
+  
+    return res
+
+end
+
+def op5CreateObjectByType(type, objectFilter)
+  logIt("* Entering: #{thisMethod()}", DEBUG)
+
+  #--- has to be expanded to handle all object filter parameters and all types (this only covers OBJECT_TYPE_HOST)
+  case type
+    when OBJECT_TYPE_HOST
+    begin
+      newObject = {
+        :host_name  => ( objectFilter[:host       ].nil?) ? objectFilter[:name] : objectFilter[:host],
+        :alias      =>   objectFilter[:name       ], 
+        :address    =>   objectFilter[:address    ],
+        :hostgroups => [ objectFilter[:hostgroup] ],
+        :template   => ( objectFilter[:template   ].nil? ) ? "default-host-template" : objectFilter[:template]
+      }
+      
+      if (! objectFilter[:custom_variables].nil?)
+        objectFilter[:custom_variables].each do |custom_variable|
+          key, value = custom_variable.split(/=/)
+          puts "key: #{key}, value: #{value}"
+          newObject[key] = value
+        end
+      end
+    end
+  else
+    return {}
+  end
+
+    type = type.gsub(/s$/, '')
+
+    objectName=newObject[:host_name]
+    uriEncoded = URI.encode($op5Url + "/api/config/#{type}/#{objectName}")
+    logIt("URI: #{uriEncoded}", DEBUG)
+  
+    uri = URI.parse(uriEncoded)
+  
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+  
+    #request = Net::HTTP::Put.new(uri.request_uri)
+    request = Net::HTTP::Put.new(uri.request_uri)
+    request.add_field("content-type","application/json")
+    
+    logIt("JSON Body incoming object: #{objectFilter.to_json}", DEBUG)
+    logIt("JSON Body parsed object: #{newObject.to_json}", DEBUG)
+    request.basic_auth($op5User, $op5Password )
+    request.body = newObject.to_json
+    response = http.request(request)
+    res=JSON.parse(response.body)
+  
+    puts res
+    return res
+
+end
+
 #-------------------------------------------------------------------
 # op5PrintObjects() - wrapper method for listing objects
 #-------------------------------------------------------------------
 def op5PrintObjects(type,objects)
   logIt("* Entering: #{thisMethod()}", DEBUG)
-  
+#  pp objects
   objects.each do |object|
     case type
     when OBJECT_TYPE_HOST
@@ -495,7 +579,6 @@ def op5GetObjectsByQuery(type, query)
   
 end
 
-
 def getQueryStringByType(type, objectFilter = {})
   
   
@@ -508,6 +591,10 @@ def getQueryStringByType(type, objectFilter = {})
       :alias  => "alias",
       :name   => "description",
       :host   => "host.name"
+    },
+    "servicegroups" => {
+      :alias  => "alias",
+      :name => "name"
     },
     "hosts" => {
       :alias  => "alias",
@@ -543,7 +630,6 @@ def getQueryStringByType(type, objectFilter = {})
   thisQuery = "all" if (thisQuery == "")
   return thisQuery
 end
-
 
 def op5ListObjects(type, objectFilter = {})
   logIt("* Entering: #{thisMethod()}", DEBUG)
@@ -628,7 +714,10 @@ opts.set_options(
   [ "--alias",            GetoptLong::OPTIONAL_ARGUMENT],
   [ "--name", "-n",       GetoptLong::OPTIONAL_ARGUMENT],
   [ "--host", "-H",       GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--hostgroup",        GetoptLong::OPTIONAL_ARGUMENT],
+  [ "--template",         GetoptLong::OPTIONAL_ARGUMENT],
   [ "--options",          GetoptLong::OPTIONAL_ARGUMENT],  
+  [ "--custom-variables", GetoptLong::OPTIONAL_ARGUMENT],  
 
   #--- extra features
   [ "--json",             GetoptLong::OPTIONAL_ARGUMENT],  
@@ -664,15 +753,20 @@ begin
       when '--type'             ; optType         = getObjectType(arg)
 
       #-- object filters
-      when '--alias'            ; optObjectFilter[:alias]        = arg
-      when '--name'             ; optObjectFilter[:name]         = arg
-      when '--host'             ; optObjectFilter[:host        ] = arg
-      when '--hostgroup'        ; optObjectFilter[:hostgroup   ] = arg
-      when '--service'          ; optObjectFilter[:service     ] = arg
-      when '--servicegroup'     ; optObjectFilter[:servicegroup] = arg
-      when '--contact'          ; optObjectFilter[:contact     ] = arg
-      when '--contactgroup'     ; optObjectFilter[:contactgroup] = arg
-      when '--query'            ; optObjectFilter[:query]        = arg
+      when '--address'          ; optObjectFilter[ :address          ] = arg
+      when '--alias'            ; optObjectFilter[ :alias            ] = arg
+      when '--contact'          ; optObjectFilter[ :contact          ] = arg
+      when '--contactgroup'     ; optObjectFilter[ :contactgroup     ] = arg
+      when '--custom-variables' ; 
+        optObjectFilter[ :custom_variables ] = [] if (optObjectFilter[ :custom_variables ].nil?)
+        optObjectFilter[ :custom_variables ] << arg
+      when '--name'             ; optObjectFilter[ :name             ] = arg
+      when '--host'             ; optObjectFilter[ :host             ] = arg
+      when '--hostgroup'        ; optObjectFilter[ :hostgroup        ] = arg
+      when '--service'          ; optObjectFilter[ :service          ] = arg
+      when '--servicegroup'     ; optObjectFilter[ :servicegroup     ] = arg
+      when '--template'         ; optObjectFilter[ :template         ] = arg
+      when '--query'            ; optObjectFilter[ :query            ] = arg
 
       #--- extra features
       when '--json'             ; optJSON = arg
@@ -725,6 +819,15 @@ when 'list'
   objects = op5ListObjects(optType,optObjectFilter)
   op5PrintObjects(optType, objects)
 when 'create'
+  res = nil
+  if (!optJSON.nil?)
+    res = op5CreateObjectByTypeJSON(optType, optJSON)
+  else
+    logIt(optObjectFilter.to_json, DEBUG)
+    res = op5CreateObjectByType(optType, optObjectFilter)
+  end
+  op5PrintObjects(optType, [res])
+  exit 0
 when 'patch'
 when 'delete'
   objects = op5ListObjects(optType,optObjectFilter)
